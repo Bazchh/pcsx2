@@ -10,6 +10,7 @@
 #include "VMManager.h"
 #include "vtlb.h"
 #include "GS/Renderers/HW/GSSceneLayer.h"
+#include "DebugTools/IAEmWatch.h"
 #include "common/Error.h"
 #include "common/Threading.h"
 
@@ -121,6 +122,7 @@ namespace PINEServer
 	static constexpr u32 EXT_CAP_PAUSE = 1;
 	static constexpr u32 EXT_CAP_SPEED = 2;
 	static constexpr u32 EXT_CAP_SCENE = 8;
+	static constexpr u32 EXT_CAP_WATCH = 16;
 	/** How long the server waits for a socket before checking the speed watchdog again. */
 	static constexpr int EXT_WATCHDOG_POLL_MS = 100;
 	/** Steady-clock instant, in ms, at which the limiter goes back to Nominal on its own. 0 means disarmed. */
@@ -191,6 +193,10 @@ namespace PINEServer
 		MsgExtSceneRule = 0x85, /**< Adds a scene rule (hide / inject quad) with a deadline. */
 		MsgExtSceneClear = 0x86, /**< Removes one rule or all. */
 		MsgExtSceneStats = 0x88, /**< Returns rule counters and layer cost. */
+		// IAEmPS2 memory watch (phase 2).
+		MsgExtWatchSet = 0x89, /**< Watches one address range for reads/writes, recording hits by pc. */
+		MsgExtWatchRead = 0x8A, /**< Returns the hit table, optionally resetting it. */
+		MsgExtWatchClear = 0x8B, /**< Removes the watch. */
 		MsgUnimplemented = 0xFF /**< Unimplemented IPC message. */
 	};
 
@@ -492,6 +498,7 @@ void PINEServer::MainLoop()
 		if (!ExtWaitReadable(s_sock, EXT_WATCHDOG_POLL_MS))
 		{
 			ExtCheckSpeedWatchdog();
+			IAEmWatch::CheckDeadline();
 			continue;
 		}
 		if (!AcceptClient())
@@ -521,6 +528,7 @@ void PINEServer::ClientLoop()
 			if (!ExtWaitReadable(s_msgsock, EXT_WATCHDOG_POLL_MS))
 			{
 				ExtCheckSpeedWatchdog();
+				IAEmWatch::CheckDeadline();
 				if (s_end.load(std::memory_order_acquire))
 					return;
 				continue;
@@ -837,7 +845,7 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 				if (!SafetyChecks(buf_cnt, 0, ret_cnt, 2 + 4, buf_size)) [[unlikely]]
 					goto error;
 				ToResultVector(ret_buffer, EXT_VERSION, ret_cnt);
-				ToResultVector(ret_buffer, static_cast<u32>(EXT_CAP_PAUSE | EXT_CAP_SPEED | EXT_CAP_SCENE), ret_cnt + 2);
+				ToResultVector(ret_buffer, static_cast<u32>(EXT_CAP_PAUSE | EXT_CAP_SPEED | EXT_CAP_SCENE | EXT_CAP_WATCH), ret_cnt + 2);
 				ret_cnt += 6;
 				break;
 			}
@@ -991,6 +999,64 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 				ToResultVector(ret_buffer, ls.hashed_last_frame, ret_cnt + 44);
 				ret_cnt += 48;
 				buf_cnt += 4;
+				break;
+			}
+			case MsgExtWatchSet:
+			{
+				// Arguments: u32 start, u32 end (exclusive), u8 cond (1 read, 2 write, 3 both), u32 duration ms (0 = until cleared).
+				// Every load/store of the game is instrumented while a watch exists, so the game runs slower: keep windows short.
+				if (!VMManager::HasValidVM())
+					goto error;
+				if (!SafetyChecks(buf_cnt, 4 + 4 + 1 + 4, ret_cnt, 0, buf_size)) [[unlikely]]
+					goto error;
+				const u32 start = FromSpan<u32>(buf, buf_cnt);
+				const u32 end = FromSpan<u32>(buf, buf_cnt + 4);
+				const u8 cond = FromSpan<u8>(buf, buf_cnt + 8);
+				const u32 duration_ms = FromSpan<u32>(buf, buf_cnt + 9);
+				if (start >= end || (cond & 3) == 0)
+					goto error;
+				Host::RunOnCPUThread([start, end, cond, duration_ms] {
+					if (VMManager::HasValidVM())
+						IAEmWatch::Set(start, end, cond, duration_ms);
+				});
+				buf_cnt += 13;
+				break;
+			}
+			case MsgExtWatchRead:
+			{
+				// Argument: u8 reset (1 = empty the table after copying). Reply: 7 x u32 stats, u32 n, then n x 160-byte entries.
+				if (!SafetyChecks(buf_cnt, 1, ret_cnt, 0, buf_size)) [[unlikely]]
+					goto error;
+				const bool reset = FromSpan<u8>(buf, buf_cnt) != 0;
+				std::vector<IAEmWatch::Entry> entries;
+				const IAEmWatch::Stats st = IAEmWatch::Read(&entries, reset);
+				const u32 n = static_cast<u32>(entries.size());
+				if (!SafetyChecks(buf_cnt, 1, ret_cnt, 7 * 4 + 4 + n * sizeof(IAEmWatch::Entry), buf_size)) [[unlikely]]
+					goto error;
+				ToResultVector(ret_buffer, st.active, ret_cnt);
+				ToResultVector(ret_buffer, st.start, ret_cnt + 4);
+				ToResultVector(ret_buffer, st.end, ret_cnt + 8);
+				ToResultVector(ret_buffer, st.total_hits, ret_cnt + 12);
+				ToResultVector(ret_buffer, st.dropped, ret_cnt + 16);
+				ToResultVector(ret_buffer, st.entries, ret_cnt + 20);
+				ToResultVector(ret_buffer, st.ms_left, ret_cnt + 24);
+				ToResultVector(ret_buffer, n, ret_cnt + 28);
+				ret_cnt += 32;
+				if (n > 0)
+				{
+					memcpy(&ret_buffer[ret_cnt], entries.data(), n * sizeof(IAEmWatch::Entry));
+					ret_cnt += n * sizeof(IAEmWatch::Entry);
+				}
+				buf_cnt += 1;
+				break;
+			}
+			case MsgExtWatchClear:
+			{
+				if (!SafetyChecks(buf_cnt, 0, ret_cnt, 0, buf_size)) [[unlikely]]
+					goto error;
+				Host::RunOnCPUThread([] {
+					IAEmWatch::Clear();
+				});
 				break;
 			}
 			default:

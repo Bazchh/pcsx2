@@ -522,6 +522,7 @@ set(pcsx2GSSources
 	GS/Renderers/HW/GSTextureReplacementLoaders.cpp
 	GS/Renderers/HW/GSTextureReplacements.cpp
 	GS/Renderers/HW/GSSceneLayer.cpp
+	DebugTools/IAEmWatch.cpp
 	GS/Renderers/SW/GSTextureCacheSW.cpp
 	)
 
@@ -565,6 +566,7 @@ set(pcsx2GSHeaders
 	GS/Renderers/HW/GSTextureCache.h
 	GS/Renderers/HW/GSTextureReplacements.h
 	GS/Renderers/HW/GSSceneLayer.h
+	DebugTools/IAEmWatch.h
 	GS/Renderers/HW/GSVertexHW.h
 	GS/Renderers/SW/GSDrawScanlineCodeGenerator.all.h
 	GS/Renderers/SW/GSDrawScanline.h

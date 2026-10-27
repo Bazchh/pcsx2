@@ -4,6 +4,7 @@
 #include "Common.h"
 #include "CDVD/CDVD.h"
 #include "DebugTools/Breakpoints.h"
+#include "DebugTools/IAEmWatch.h"
 #include "Elfheader.h"
 #include "GS.h"
 #include "Host.h"
@@ -1577,6 +1578,10 @@ void dynarecMemcheck(size_t i)
 		if (!mc.cond.Evaluate())
 			return;
 	}
+
+	// IAEmPS2 watch: record the hit and keep running instead of pausing the VM.
+	if (IAEmWatch::OnMemCheckHit(i))
+		return;
 
 	if (!CBreakPoints::HandleMemCheckHit(BREAKPOINT_EE, mc.start, mc.end))
 		return;
