@@ -120,6 +120,7 @@ namespace PINEServer
 	static constexpr u16 EXT_VERSION = 1;
 	static constexpr u32 EXT_CAP_PAUSE = 1;
 	static constexpr u32 EXT_CAP_SPEED = 2;
+	static constexpr u32 EXT_CAP_SCENE = 8;
 	/** How long the server waits for a socket before checking the speed watchdog again. */
 	static constexpr int EXT_WATCHDOG_POLL_MS = 100;
 	/** Steady-clock instant, in ms, at which the limiter goes back to Nominal on its own. 0 means disarmed. */
@@ -185,7 +186,7 @@ namespace PINEServer
 		MsgExtSetPaused = 0x81, /**< Pauses or resumes the VM, like the pause hotkey. */
 		MsgExtSetSpeed = 0x82, /**< Sets the limiter mode and scalar, with an optional deadline. */
 		MsgExtGetSpeed = 0x83, /**< Returns the limiter mode, target speed and remaining deadline. */
-		// IAEmPS2 scene layer (phase 4 spike). Not advertised in the capability mask yet.
+		// IAEmPS2 scene layer (phase 4).
 		MsgExtSceneList = 0x84, /**< Returns the draw signatures of the last frame. */
 		MsgExtSceneRule = 0x85, /**< Adds a scene rule (hide / inject quad) with a deadline. */
 		MsgExtSceneClear = 0x86, /**< Removes one rule or all. */
@@ -836,7 +837,7 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 				if (!SafetyChecks(buf_cnt, 0, ret_cnt, 2 + 4, buf_size)) [[unlikely]]
 					goto error;
 				ToResultVector(ret_buffer, EXT_VERSION, ret_cnt);
-				ToResultVector(ret_buffer, static_cast<u32>(EXT_CAP_PAUSE | EXT_CAP_SPEED), ret_cnt + 2);
+				ToResultVector(ret_buffer, static_cast<u32>(EXT_CAP_PAUSE | EXT_CAP_SPEED | EXT_CAP_SCENE), ret_cnt + 2);
 				ret_cnt += 6;
 				break;
 			}
@@ -921,44 +922,45 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 			}
 			case MsgExtSceneList:
 			{
-				// Reply: u32 frame, u32 n, then n x 32-byte signatures (capped so the reply fits).
+				// Reply: u32 frame, u32 n, then n x 40-byte signatures (capped so the reply fits).
 				u32 frame_no = 0;
 				const std::vector<GSSceneLayer::Signature> list = GSSceneLayer::LastFrame(&frame_no);
 				const u32 n = std::min<u32>(static_cast<u32>(list.size()), 8000);
-				if (!SafetyChecks(buf_cnt, 0, ret_cnt, 8 + n * 32, buf_size)) [[unlikely]]
+				if (!SafetyChecks(buf_cnt, 0, ret_cnt, 8 + n * 40, buf_size)) [[unlikely]]
 					goto error;
 				ToResultVector(ret_buffer, frame_no, ret_cnt);
 				ToResultVector(ret_buffer, n, ret_cnt + 4);
 				ret_cnt += 8;
 				if (n > 0)
 				{
-					memcpy(&ret_buffer[ret_cnt], list.data(), n * 32);
-					ret_cnt += n * 32;
+					memcpy(&ret_buffer[ret_cnt], list.data(), n * 40);
+					ret_cnt += n * 40;
 				}
 				break;
 			}
 			case MsgExtSceneRule:
 			{
-				// Arguments: u8 kind, u64 hash, 4 x s16 rect, u32 z, u32 rgba, u32 duration ms, u32 after_nth. Reply: u32 id.
-				if (!SafetyChecks(buf_cnt, 1 + 8 + 8 + 4 + 4 + 4 + 4, ret_cnt, 4, buf_size)) [[unlikely]]
+				// Arguments: u8 kind, u64 tex hash, u64 shape hash, 4 x s16 rect, u32 z, u32 rgba, u32 duration ms, u32 after_nth. Reply: u32 id.
+				if (!SafetyChecks(buf_cnt, 1 + 8 + 8 + 8 + 4 + 4 + 4 + 4, ret_cnt, 4, buf_size)) [[unlikely]]
 					goto error;
 				GSSceneLayer::Rule rule = {};
 				rule.kind = FromSpan<u8>(buf, buf_cnt);
 				rule.tex_hash = FromSpan<u64>(buf, buf_cnt + 1);
-				rule.x0 = FromSpan<s16>(buf, buf_cnt + 9);
-				rule.y0 = FromSpan<s16>(buf, buf_cnt + 11);
-				rule.x1 = FromSpan<s16>(buf, buf_cnt + 13);
-				rule.y1 = FromSpan<s16>(buf, buf_cnt + 15);
-				rule.z = FromSpan<u32>(buf, buf_cnt + 17);
-				rule.rgba = FromSpan<u32>(buf, buf_cnt + 21);
-				const u32 duration_ms = FromSpan<u32>(buf, buf_cnt + 25);
-				rule.after_nth = FromSpan<u32>(buf, buf_cnt + 29);
+				rule.shape_hash = FromSpan<u64>(buf, buf_cnt + 9);
+				rule.x0 = FromSpan<s16>(buf, buf_cnt + 17);
+				rule.y0 = FromSpan<s16>(buf, buf_cnt + 19);
+				rule.x1 = FromSpan<s16>(buf, buf_cnt + 21);
+				rule.y1 = FromSpan<s16>(buf, buf_cnt + 23);
+				rule.z = FromSpan<u32>(buf, buf_cnt + 25);
+				rule.rgba = FromSpan<u32>(buf, buf_cnt + 29);
+				const u32 duration_ms = FromSpan<u32>(buf, buf_cnt + 33);
+				rule.after_nth = FromSpan<u32>(buf, buf_cnt + 37);
 				if (rule.kind != GSSceneLayer::Hide && rule.kind != GSSceneLayer::InjectQuad)
 					goto error;
 				const u32 id = GSSceneLayer::AddRule(rule, duration_ms);
 				ToResultVector(ret_buffer, id, ret_cnt);
 				ret_cnt += 4;
-				buf_cnt += 33;
+				buf_cnt += 41;
 				break;
 			}
 			case MsgExtSceneClear:

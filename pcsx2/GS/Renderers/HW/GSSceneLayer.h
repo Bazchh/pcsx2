@@ -16,6 +16,7 @@
 #include <vector>
 
 struct GSHWDrawConfig;
+struct GSVertex;
 class GSDrawingContext;
 
 namespace GSSceneLayer
@@ -23,6 +24,7 @@ namespace GSSceneLayer
 	struct Signature
 	{
 		u64 tex_hash;
+		u64 shape_hash; // hash of the quantised texture coordinates: invariant to camera and pose, identifies the mesh chunk
 		u32 nverts;
 		s16 x0, y0, x1, y1; // screen-space pixels, context offset already removed
 		u32 z_min, z_max;
@@ -30,7 +32,7 @@ namespace GSSceneLayer
 		u8 qualifies; // 1 = render target + depth buffer + depth test + depth write (a "world" draw)
 		u16 pad;
 	};
-	static_assert(sizeof(Signature) == 32);
+	static_assert(sizeof(Signature) == 40);
 
 	enum RuleKind : u8
 	{
@@ -42,7 +44,8 @@ namespace GSSceneLayer
 	{
 		u32 id;
 		u8 kind;
-		u64 tex_hash;       // Hide: signature to hide
+		u64 tex_hash;       // Hide: texture hash to hide
+		u64 shape_hash;     // Hide: 0 = any chunk with that texture; otherwise only this chunk
 		s16 x0, y0, x1, y1; // InjectQuad: screen-space rect in pixels
 		u32 z;              // InjectQuad: raw GS depth value
 		u32 rgba;           // InjectQuad: colour
@@ -69,7 +72,7 @@ namespace GSSceneLayer
 	};
 
 	// GS thread. Returns true when the draw must be skipped (hidden by a rule).
-	bool OnDraw(int frame, u64 tex_hash, bool fallback, u32 nverts, const GSVector4i& bbox, u32 z_min, u32 z_max, bool qualifies);
+	bool OnDraw(int frame, u64 tex_hash, bool fallback, const GSVertex* verts, u32 nverts, bool fst, const GSVector4i& bbox, u32 z_min, u32 z_max, bool qualifies);
 	// GS thread. Call after the batch was sent (or skipped); injects quads when a rule asks for this draw.
 	void AfterDraw(const GSHWDrawConfig& conf, const GSDrawingContext* ctx, bool qualifies);
 

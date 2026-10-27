@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <mutex>
 #include <unordered_map>
 
@@ -43,6 +44,40 @@ namespace GSSceneLayer
 		u64 s_cur_ns = 0;
 		alignas(32) GSVertex s_quad[4];
 		u16 s_quad_idx[6] = {0, 1, 2, 1, 3, 2};
+
+		// Texture coordinates of a mesh chunk do not change with camera or pose: with FST they are 12.4 integers, with STQ
+		// they are (S/Q, T/Q), quantised to 1/4096. FNV-1a over them, plus the vertex count, names the chunk.
+		u64 ShapeHash(const GSVertex* verts, u32 nverts, bool fst)
+		{
+			u64 h = 0xcbf29ce484222325ull;
+			auto mix = [&h](u32 v) {
+				for (int i = 0; i < 4; i++)
+				{
+					h ^= (v >> (i * 8)) & 0xFF;
+					h *= 0x100000001b3ull;
+				}
+			};
+			mix(nverts);
+			if (!verts)
+				return h;
+			for (u32 i = 0; i < nverts; i++)
+			{
+				const GSVertex& v = verts[i];
+				if (fst)
+				{
+					mix(v.U);
+					mix(v.V);
+				}
+				else
+				{
+					// 1/8 of a texel is coarse enough to swallow the float noise of S*Q between frames and fine enough to tell chunks apart.
+					const float q = (v.RGBAQ.Q != 0.0f) ? v.RGBAQ.Q : 1.0f;
+					mix(static_cast<u32>(static_cast<s32>(std::lround(v.ST.S / q * 8.0f))));
+					mix(static_cast<u32>(static_cast<s32>(std::lround(v.ST.T / q * 8.0f))));
+				}
+			}
+			return h;
+		}
 
 		u64 NowNs()
 		{
@@ -193,7 +228,7 @@ namespace GSSceneLayer
 		return static_cast<s64>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 	}
 
-	bool OnDraw(int frame, u64 tex_hash, bool fallback, u32 nverts, const GSVector4i& bbox, u32 z_min, u32 z_max, bool qualifies)
+	bool OnDraw(int frame, u64 tex_hash, bool fallback, const GSVertex* verts, u32 nverts, bool fst, const GSVector4i& bbox, u32 z_min, u32 z_max, bool qualifies)
 	{
 		const u64 t0 = NowNs();
 		if (frame != s_cur_frame)
@@ -201,6 +236,7 @@ namespace GSSceneLayer
 
 		Signature sig = {};
 		sig.tex_hash = tex_hash;
+		sig.shape_hash = ShapeHash(verts, nverts, fst);
 		sig.nverts = nverts;
 		sig.x0 = static_cast<s16>(std::clamp(bbox.x, -32768, 32767));
 		sig.y0 = static_cast<s16>(std::clamp(bbox.y, -32768, 32767));
@@ -210,6 +246,7 @@ namespace GSSceneLayer
 		sig.z_max = z_max;
 		sig.fallback = fallback ? 1 : 0;
 		sig.qualifies = qualifies ? 1 : 0;
+		sig.pad = fst ? 1 : 0; // which coordinate kind fed the shape hash (diagnostic)
 		s_cur_list.push_back(sig);
 		if (qualifies)
 			s_cur_qualifying++;
@@ -220,7 +257,7 @@ namespace GSSceneLayer
 		for (size_t i = 0; i < s_cur_rules.size(); i++)
 		{
 			const Rule& r = s_cur_rules[i];
-			if (r.kind == Hide && r.tex_hash == tex_hash)
+			if (r.kind == Hide && r.tex_hash == tex_hash && (r.shape_hash == 0 || r.shape_hash == sig.shape_hash))
 			{
 				s_cur_seen[i] = 1;
 				s_cur_applied[i] = 1;

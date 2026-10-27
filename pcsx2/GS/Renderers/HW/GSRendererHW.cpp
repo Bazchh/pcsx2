@@ -9689,7 +9689,7 @@ __ri void GSRendererHW::DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Ta
 		}
 		const bool scene_qualifies = m_conf.rt && m_conf.ds && (m_conf.depth.ztst == ZTST_GEQUAL || m_conf.depth.ztst == ZTST_GREATER) && m_conf.depth.zwe;
 		const GSVector4i scene_bbox = GSVector4i(m_vt.m_min.p.xyxy(m_vt.m_max.p));
-		const bool scene_hidden = GSSceneLayer::OnDraw(g_perfmon.GetFrame(), scene_hash, scene_fallback, m_conf.nverts, scene_bbox,
+		const bool scene_hidden = GSSceneLayer::OnDraw(g_perfmon.GetFrame(), scene_hash, scene_fallback, m_conf.verts, m_conf.nverts, m_conf.vs.fst != 0, scene_bbox,
 			static_cast<u32>(m_vt.m_min.p.z), static_cast<u32>(m_vt.m_max.p.z), scene_qualifies);
 		if (!scene_hidden)
 			g_gs_device->RenderHW(m_conf);
