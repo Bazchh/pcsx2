@@ -355,6 +355,7 @@
     <ClCompile Include="GS\Renderers\DX12\GSTexture12.cpp" />
     <ClCompile Include="GS\Renderers\HW\GSTextureReplacementLoaders.cpp" />
     <ClCompile Include="GS\Renderers\HW\GSTextureReplacements.cpp" />
+    <ClCompile Include="GS\Renderers\HW\GSSceneLayer.cpp" />
     <ClCompile Include="GS\Renderers\Vulkan\GSDeviceVK.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
     </ClCompile>
@@ -801,6 +802,7 @@
     <ClInclude Include="GS\Renderers\DX12\GSDevice12.h" />
     <ClInclude Include="GS\Renderers\DX12\GSTexture12.h" />
     <ClInclude Include="GS\Renderers\HW\GSTextureReplacements.h" />
+    <ClInclude Include="GS\Renderers\HW\GSSceneLayer.h" />
     <ClInclude Include="GS\Renderers\Vulkan\GSDeviceVK.h">
       <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
     </ClInclude>

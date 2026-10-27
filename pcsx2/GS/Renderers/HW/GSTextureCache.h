@@ -133,6 +133,9 @@ public:
 		std::pair<u8, u8> alpha_minmax;
 		bool valid_alpha_minmax;
 		bool is_replacement;
+		// IAEmPS2 scene layer: the hashes that identify this texture across frames (the key is not reachable from a Source).
+		u64 tex0_hash = 0;
+		u64 clut_hash = 0;
 	};
 
 	using HashCacheMap = std::unordered_map<HashCacheKey, HashCacheEntry, HashCacheKeyHash>;

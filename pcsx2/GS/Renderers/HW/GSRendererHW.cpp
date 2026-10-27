@@ -3,6 +3,7 @@
 
 #include "GS/Renderers/HW/GSRendererHW.h"
 #include "GS/Renderers/HW/GSTextureReplacements.h"
+#include "GS/Renderers/HW/GSSceneLayer.h"
 #include "GS/GSGL.h"
 #include "GS/GSPerfMon.h"
 #include "GS/GSUtil.h"
@@ -9670,7 +9671,30 @@ __ri void GSRendererHW::DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Ta
 	}
 
 	if (!m_channel_shuffle_width)
-		g_gs_device->RenderHW(m_conf);
+	{
+		// IAEmPS2 scene layer (phase 4 spike): one entry point right before the batch goes to the device.
+		// Identity = texture hash from the hash cache when the texture has one; otherwise its address and format.
+		u64 scene_hash;
+		bool scene_fallback;
+		if (tex && tex->m_from_hash_cache && tex->m_from_hash_cache->tex0_hash != 0)
+		{
+			scene_hash = tex->m_from_hash_cache->tex0_hash ^ (tex->m_from_hash_cache->clut_hash * 0x9E3779B97F4A7C15ull);
+			scene_fallback = false;
+		}
+		else
+		{
+			scene_hash = 0xF000000000000000ull | (static_cast<u64>(m_cached_ctx.TEX0.TBP0) << 24) | (static_cast<u64>(m_cached_ctx.TEX0.PSM) << 16) |
+			             (static_cast<u64>(m_cached_ctx.TEX0.TW) << 8) | static_cast<u64>(m_cached_ctx.TEX0.TH);
+			scene_fallback = true;
+		}
+		const bool scene_qualifies = m_conf.rt && m_conf.ds && (m_conf.depth.ztst == ZTST_GEQUAL || m_conf.depth.ztst == ZTST_GREATER) && m_conf.depth.zwe;
+		const GSVector4i scene_bbox = GSVector4i(m_vt.m_min.p.xyxy(m_vt.m_max.p));
+		const bool scene_hidden = GSSceneLayer::OnDraw(g_perfmon.GetFrame(), scene_hash, scene_fallback, m_conf.nverts, scene_bbox,
+			static_cast<u32>(m_vt.m_min.p.z), static_cast<u32>(m_vt.m_max.p.z), scene_qualifies);
+		if (!scene_hidden)
+			g_gs_device->RenderHW(m_conf);
+		GSSceneLayer::AfterDraw(m_conf, m_context, scene_qualifies);
+	}
 	else
 		m_last_rt = rt;
 

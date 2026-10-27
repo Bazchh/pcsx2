@@ -9,6 +9,7 @@
 #include "PINE.h"
 #include "VMManager.h"
 #include "vtlb.h"
+#include "GS/Renderers/HW/GSSceneLayer.h"
 #include "common/Error.h"
 #include "common/Threading.h"
 
@@ -184,6 +185,11 @@ namespace PINEServer
 		MsgExtSetPaused = 0x81, /**< Pauses or resumes the VM, like the pause hotkey. */
 		MsgExtSetSpeed = 0x82, /**< Sets the limiter mode and scalar, with an optional deadline. */
 		MsgExtGetSpeed = 0x83, /**< Returns the limiter mode, target speed and remaining deadline. */
+		// IAEmPS2 scene layer (phase 4 spike). Not advertised in the capability mask yet.
+		MsgExtSceneList = 0x84, /**< Returns the draw signatures of the last frame. */
+		MsgExtSceneRule = 0x85, /**< Adds a scene rule (hide / inject quad) with a deadline. */
+		MsgExtSceneClear = 0x86, /**< Removes one rule or all. */
+		MsgExtSceneStats = 0x88, /**< Returns rule counters and layer cost. */
 		MsgUnimplemented = 0xFF /**< Unimplemented IPC message. */
 	};
 
@@ -911,6 +917,78 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 				ToResultVector(ret_buffer, VMManager::GetTargetSpeed(), ret_cnt + 1);
 				ToResultVector(ret_buffer, static_cast<u32>(remaining), ret_cnt + 5);
 				ret_cnt += 9;
+				break;
+			}
+			case MsgExtSceneList:
+			{
+				// Reply: u32 frame, u32 n, then n x 32-byte signatures (capped so the reply fits).
+				u32 frame_no = 0;
+				const std::vector<GSSceneLayer::Signature> list = GSSceneLayer::LastFrame(&frame_no);
+				const u32 n = std::min<u32>(static_cast<u32>(list.size()), 8000);
+				if (!SafetyChecks(buf_cnt, 0, ret_cnt, 8 + n * 32, buf_size)) [[unlikely]]
+					goto error;
+				ToResultVector(ret_buffer, frame_no, ret_cnt);
+				ToResultVector(ret_buffer, n, ret_cnt + 4);
+				ret_cnt += 8;
+				if (n > 0)
+				{
+					memcpy(&ret_buffer[ret_cnt], list.data(), n * 32);
+					ret_cnt += n * 32;
+				}
+				break;
+			}
+			case MsgExtSceneRule:
+			{
+				// Arguments: u8 kind, u64 hash, 4 x s16 rect, u32 z, u32 rgba, u32 duration ms, u32 after_nth. Reply: u32 id.
+				if (!SafetyChecks(buf_cnt, 1 + 8 + 8 + 4 + 4 + 4 + 4, ret_cnt, 4, buf_size)) [[unlikely]]
+					goto error;
+				GSSceneLayer::Rule rule = {};
+				rule.kind = FromSpan<u8>(buf, buf_cnt);
+				rule.tex_hash = FromSpan<u64>(buf, buf_cnt + 1);
+				rule.x0 = FromSpan<s16>(buf, buf_cnt + 9);
+				rule.y0 = FromSpan<s16>(buf, buf_cnt + 11);
+				rule.x1 = FromSpan<s16>(buf, buf_cnt + 13);
+				rule.y1 = FromSpan<s16>(buf, buf_cnt + 15);
+				rule.z = FromSpan<u32>(buf, buf_cnt + 17);
+				rule.rgba = FromSpan<u32>(buf, buf_cnt + 21);
+				const u32 duration_ms = FromSpan<u32>(buf, buf_cnt + 25);
+				rule.after_nth = FromSpan<u32>(buf, buf_cnt + 29);
+				if (rule.kind != GSSceneLayer::Hide && rule.kind != GSSceneLayer::InjectQuad)
+					goto error;
+				const u32 id = GSSceneLayer::AddRule(rule, duration_ms);
+				ToResultVector(ret_buffer, id, ret_cnt);
+				ret_cnt += 4;
+				buf_cnt += 33;
+				break;
+			}
+			case MsgExtSceneClear:
+			{
+				if (!SafetyChecks(buf_cnt, 4, ret_cnt, 0, buf_size)) [[unlikely]]
+					goto error;
+				GSSceneLayer::ClearRules(FromSpan<u32>(buf, buf_cnt));
+				buf_cnt += 4;
+				break;
+			}
+			case MsgExtSceneStats:
+			{
+				// Argument: u32 rule id (0 = layer only). Reply: u32 exists, u32 frames_total, u32 seen, u32 applied,
+				// u32 layer_frames, u64 ns_total, u64 ns_last_frame, u32 draws_last, u32 qualifying_last, u32 hashed_last.
+				if (!SafetyChecks(buf_cnt, 4, ret_cnt, 4 * 5 + 8 * 2 + 4 * 3, buf_size)) [[unlikely]]
+					goto error;
+				const GSSceneLayer::RuleStats rs = GSSceneLayer::GetRuleStats(FromSpan<u32>(buf, buf_cnt));
+				const GSSceneLayer::LayerStats ls = GSSceneLayer::GetLayerStats();
+				ToResultVector(ret_buffer, static_cast<u32>(rs.exists ? 1 : 0), ret_cnt);
+				ToResultVector(ret_buffer, rs.frames_total, ret_cnt + 4);
+				ToResultVector(ret_buffer, rs.frames_seen, ret_cnt + 8);
+				ToResultVector(ret_buffer, rs.frames_applied, ret_cnt + 12);
+				ToResultVector(ret_buffer, ls.frames, ret_cnt + 16);
+				ToResultVector(ret_buffer, ls.ns_total, ret_cnt + 20);
+				ToResultVector(ret_buffer, ls.ns_last_frame, ret_cnt + 28);
+				ToResultVector(ret_buffer, ls.draws_last_frame, ret_cnt + 36);
+				ToResultVector(ret_buffer, ls.qualifying_last_frame, ret_cnt + 40);
+				ToResultVector(ret_buffer, ls.hashed_last_frame, ret_cnt + 44);
+				ret_cnt += 48;
+				buf_cnt += 4;
 				break;
 			}
 			default:

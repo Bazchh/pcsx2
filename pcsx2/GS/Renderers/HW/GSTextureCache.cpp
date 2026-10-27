@@ -7120,7 +7120,10 @@ GSTextureCache::HashCacheEntry* GSTextureCache::LookupHashCache(const GIFRegTEX0
 			paltex = false;
 			const HashCacheEntry entry{replacement_tex, 1u, 0u, alpha_minmax, true, true};
 			m_hash_cache_replacement_memory_usage += entry.texture->GetMemUsage();
-			return &m_hash_cache.emplace(key, entry).first->second;
+			HashCacheEntry& inserted = m_hash_cache.emplace(key, entry).first->second;
+			inserted.tex0_hash = key.TEX0Hash;
+			inserted.clut_hash = key.CLUTHash;
+			return &inserted;
 		}
 		else if (
 			replacement_texture_pending ||
@@ -7203,7 +7206,10 @@ GSTextureCache::HashCacheEntry* GSTextureCache::LookupHashCache(const GIFRegTEX0
 	// insert into the cache cache, and we're done
 	const HashCacheEntry entry{tex, 1u, 0u, alpha_minmax, compute_alpha_minmax, false};
 	m_hash_cache_memory_usage += tex->GetMemUsage();
-	return &m_hash_cache.emplace(key, entry).first->second;
+	HashCacheEntry& inserted = m_hash_cache.emplace(key, entry).first->second;
+	inserted.tex0_hash = key.TEX0Hash;
+	inserted.clut_hash = key.CLUTHash;
+	return &inserted;
 }
 
 GSTextureCache::HashCacheMap::iterator GSTextureCache::RemoveFromHashCache(HashCacheMap::iterator it)
@@ -8781,7 +8787,9 @@ void GSTextureCache::InjectHashCacheTexture(const HashCacheKey& key, GSTexture* 
 		// We must've got evicted before we finished loading. No matter, add it in there anyway;
 		// if it's not used again, it'll get tossed out later.
 		const HashCacheEntry entry{tex, 1u, 0u, alpha_minmax, true, true};
-		m_hash_cache.emplace(key, entry);
+		HashCacheEntry& inserted = m_hash_cache.emplace(key, entry).first->second;
+		inserted.tex0_hash = key.TEX0Hash;
+		inserted.clut_hash = key.CLUTHash;
 		return;
 	}
 
