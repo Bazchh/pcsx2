@@ -12,7 +12,10 @@
 #include "common/Error.h"
 #include "common/Threading.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <span>
@@ -47,6 +50,7 @@
 			(a) = -1; \
 		} \
 	} while (0)
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -62,6 +66,7 @@
 			(a) = -1; \
 		} \
 	} while (0)
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -109,6 +114,21 @@ namespace PINEServer
 
 	// Whether the socket processing thread should stop executing/is stopped.
 	static std::atomic_bool s_end{true};
+
+	// IAEmPS2 extension.
+	static constexpr u16 EXT_VERSION = 1;
+	static constexpr u32 EXT_CAP_PAUSE = 1;
+	static constexpr u32 EXT_CAP_SPEED = 2;
+	/** How long the server waits for a socket before checking the speed watchdog again. */
+	static constexpr int EXT_WATCHDOG_POLL_MS = 100;
+	/** Steady-clock instant, in ms, at which the limiter goes back to Nominal on its own. 0 means disarmed. */
+	static std::atomic<s64> s_ext_speed_deadline_ms{0};
+
+	static s64 ExtNowMs();
+	/** Resumes normal speed on the CPU thread once the deadline has passed. Runs on the PINE thread. */
+	static void ExtCheckSpeedWatchdog();
+	/** Waits until the socket is readable (or accept-ready) or the timeout passes; false on timeout. */
+	static bool ExtWaitReadable(decltype(s_sock) sock, int timeout_ms);
 
 	/**
 	 * Maximum memory used by an IPC message request.
@@ -159,6 +179,11 @@ namespace PINEServer
 		MsgUUID = 0xD, /**< Returns the game UUID. */
 		MsgGameVersion = 0xE, /**< Returns the game verion. */
 		MsgStatus = 0xF, /**< Returns the emulator status. */
+		// IAEmPS2 extension. Opcodes with the high bit set never collide with upstream additions.
+		MsgExtCapabilities = 0x80, /**< Returns the extension version and capability mask. */
+		MsgExtSetPaused = 0x81, /**< Pauses or resumes the VM, like the pause hotkey. */
+		MsgExtSetSpeed = 0x82, /**< Sets the limiter mode and scalar, with an optional deadline. */
+		MsgExtGetSpeed = 0x83, /**< Returns the limiter mode, target speed and remaining deadline. */
 		MsgUnimplemented = 0xFF /**< Unimplemented IPC message. */
 	};
 
@@ -259,6 +284,44 @@ namespace PINEServer
 				 (reply_len + reply_size) >= MAX_IPC_RETURN_SIZE);
 	}
 } // namespace PINEServer
+
+s64 PINEServer::ExtNowMs()
+{
+	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void PINEServer::ExtCheckSpeedWatchdog()
+{
+	s64 deadline = s_ext_speed_deadline_ms.load(std::memory_order_acquire);
+	if (deadline == 0 || ExtNowMs() < deadline)
+		return;
+	// Whoever disarms it is the one that resumes, so the resume runs exactly once.
+	if (!s_ext_speed_deadline_ms.compare_exchange_strong(deadline, 0))
+		return;
+	Host::RunOnCPUThread([] {
+		if (!VMManager::HasValidVM())
+			return;
+		VMManager::SetLimiterMode(LimiterModeType::Nominal);
+		VMManager::UpdateTargetSpeed();
+	});
+}
+
+bool PINEServer::ExtWaitReadable(decltype(s_sock) sock, int timeout_ms)
+{
+	fd_set set;
+	FD_ZERO(&set);
+	FD_SET(sock, &set);
+	timeval tv;
+	tv.tv_sec = timeout_ms / 1000;
+	tv.tv_usec = (timeout_ms % 1000) * 1000;
+#ifdef _WIN32
+	const int nfds = 0; // ignored by Winsock
+#else
+	const int nfds = static_cast<int>(sock) + 1;
+#endif
+	// An error (-1) also returns true: the blocking call that follows reports it the usual way.
+	return select(nfds, &set, nullptr, nullptr, &tv) != 0;
+}
 
 bool PINEServer::Initialize(int slot)
 {
@@ -418,6 +481,12 @@ void PINEServer::MainLoop()
 
 	while (!s_end.load(std::memory_order_acquire))
 	{
+		// The watchdog has to fire with no client connected too, so never block in accept() for long.
+		if (!ExtWaitReadable(s_sock, EXT_WATCHDOG_POLL_MS))
+		{
+			ExtCheckSpeedWatchdog();
+			continue;
+		}
 		if (!AcceptClient())
 			continue;
 
@@ -442,6 +511,13 @@ void PINEServer::ClientLoop()
 		// socket datagram splittage, we continue to read
 		while (receive_length < end_length)
 		{
+			if (!ExtWaitReadable(s_msgsock, EXT_WATCHDOG_POLL_MS))
+			{
+				ExtCheckSpeedWatchdog();
+				if (s_end.load(std::memory_order_acquire))
+					return;
+				continue;
+			}
 			const auto tmp_length = read_portable(s_msgsock, &ipc_buffer_span[receive_length], MAX_IPC_SIZE - receive_length);
 
 			// we recreate the socket if an error happens
@@ -629,12 +705,14 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 			}
 			case MsgVersion:
 			{
-				u32 size = strlen(BuildVersion::GitRev) + 7;
+				// The suffix tells clients this build carries the extension; the "PCSX2 " prefix is unchanged.
+				const std::string version = fmt::format("PCSX2 {} +iaemps2-ext{}", BuildVersion::GitRev, EXT_VERSION);
+				const u32 size = version.size() + 1;
 				if (!SafetyChecks(buf_cnt, 0, ret_cnt, size + 4, buf_size)) [[unlikely]]
 					goto error;
 				ToResultVector(ret_buffer, size, ret_cnt);
 				ret_cnt += 4;
-				snprintf(reinterpret_cast<char*>(&ret_buffer[ret_cnt]), size, "PCSX2 %s", BuildVersion::GitRev);
+				memcpy(&ret_buffer[ret_cnt], version.c_str(), size);
 				ret_cnt += size;
 				break;
 			}
@@ -744,6 +822,95 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 
 				ToResultVector(ret_buffer, status, ret_cnt);
 				ret_cnt += 4;
+				break;
+			}
+			case MsgExtCapabilities:
+			{
+				// Reply: u16 extension version, u32 capability mask. Fails on upstream builds (default case).
+				if (!SafetyChecks(buf_cnt, 0, ret_cnt, 2 + 4, buf_size)) [[unlikely]]
+					goto error;
+				ToResultVector(ret_buffer, EXT_VERSION, ret_cnt);
+				ToResultVector(ret_buffer, static_cast<u32>(EXT_CAP_PAUSE | EXT_CAP_SPEED), ret_cnt + 2);
+				ret_cnt += 6;
+				break;
+			}
+			case MsgExtSetPaused:
+			{
+				// Argument: u8 (1 pause, 0 resume). Confirmation comes through MsgStatus.
+				if (!VMManager::HasValidVM())
+					goto error;
+				if (!SafetyChecks(buf_cnt, 1, ret_cnt, 0, buf_size)) [[unlikely]]
+					goto error;
+				Host::RunOnCPUThread([paused = (FromSpan<u8>(buf, buf_cnt) != 0)] {
+					VMManager::SetPaused(paused);
+				});
+				buf_cnt += 1;
+				break;
+			}
+			case MsgExtSetSpeed:
+			{
+				// Arguments: u8 mode (0 nominal, 1 slomo, 2 turbo), f32 scalar, u32 duration in ms.
+				// Mode 0 ignores the scalar and disarms the watchdog. Duration 0 keeps the mode until told otherwise.
+				if (!VMManager::HasValidVM())
+					goto error;
+				if (!SafetyChecks(buf_cnt, 1 + 4 + 4, ret_cnt, 0, buf_size)) [[unlikely]]
+					goto error;
+				const u8 mode = FromSpan<u8>(buf, buf_cnt);
+				const float scalar = FromSpan<float>(buf, buf_cnt + 1);
+				const u32 duration_ms = FromSpan<u32>(buf, buf_cnt + 5);
+				// A scalar of 0 would mean unlimited speed, the opposite of what a slow-motion caller wants.
+				if (mode > 2 || (mode != 0 && !(std::isfinite(scalar) && scalar > 0.0f)))
+					goto error;
+				const s64 deadline = (mode != 0 && duration_ms > 0) ? (ExtNowMs() + duration_ms) : 0;
+				s_ext_speed_deadline_ms.store(deadline, std::memory_order_release);
+				Host::RunOnCPUThread([mode, scalar] {
+					if (!VMManager::HasValidVM())
+						return;
+					LimiterModeType limiter = LimiterModeType::Nominal;
+					if (mode == 1)
+					{
+						EmuConfig.EmulationSpeed.SlomoScalar = scalar;
+						limiter = LimiterModeType::Slomo;
+					}
+					else if (mode == 2)
+					{
+						EmuConfig.EmulationSpeed.TurboScalar = scalar;
+						limiter = LimiterModeType::Turbo;
+					}
+					VMManager::SetLimiterMode(limiter);
+					// SetLimiterMode() returns early when the mode is unchanged, but the scalar may have changed.
+					VMManager::UpdateTargetSpeed();
+				});
+				buf_cnt += 9;
+				break;
+			}
+			case MsgExtGetSpeed:
+			{
+				// Reply: u8 mode (3 = unlimited, set by the player's hotkey), f32 target speed, u32 ms left on the watchdog.
+				if (!SafetyChecks(buf_cnt, 0, ret_cnt, 1 + 4 + 4, buf_size)) [[unlikely]]
+					goto error;
+				u8 mode = 0;
+				switch (VMManager::GetLimiterMode())
+				{
+					case LimiterModeType::Slomo:
+						mode = 1;
+						break;
+					case LimiterModeType::Turbo:
+						mode = 2;
+						break;
+					case LimiterModeType::Unlimited:
+						mode = 3;
+						break;
+					default:
+						mode = 0;
+						break;
+				}
+				const s64 deadline = s_ext_speed_deadline_ms.load(std::memory_order_acquire);
+				const s64 remaining = (deadline == 0) ? 0 : std::max<s64>(deadline - ExtNowMs(), 0);
+				ToResultVector(ret_buffer, mode, ret_cnt);
+				ToResultVector(ret_buffer, VMManager::GetTargetSpeed(), ret_cnt + 1);
+				ToResultVector(ret_buffer, static_cast<u32>(remaining), ret_cnt + 5);
+				ret_cnt += 9;
 				break;
 			}
 			default:
