@@ -46,7 +46,7 @@ namespace GSSceneLayer
 		u8 kind;
 		u64 tex_hash;       // Hide: texture hash to hide
 		u64 shape_hash;     // Hide: 0 = any chunk with that texture; otherwise only this chunk
-		s16 x0, y0, x1, y1; // InjectQuad: screen-space rect in pixels
+		s16 x0, y0, x1, y1; // InjectQuad: screen-space rect in pixels. Hide: optional region; the rule only acts on draws whose bbox meets it (all zero = anywhere)
 		u32 z;              // InjectQuad: raw GS depth value
 		u32 rgba;           // InjectQuad: colour
 		u32 after_nth;      // InjectQuad: inject after the N-th qualifying draw of the frame (1 = first)

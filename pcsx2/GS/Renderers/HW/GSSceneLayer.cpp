@@ -257,7 +257,8 @@ namespace GSSceneLayer
 		for (size_t i = 0; i < s_cur_rules.size(); i++)
 		{
 			const Rule& r = s_cur_rules[i];
-			if (r.kind == Hide && r.tex_hash == tex_hash && (r.shape_hash == 0 || r.shape_hash == sig.shape_hash))
+			if (r.kind == Hide && r.tex_hash == tex_hash && (r.shape_hash == 0 || r.shape_hash == sig.shape_hash) &&
+				(r.x1 <= r.x0 || r.y1 <= r.y0 || (sig.x0 < r.x1 && sig.x1 > r.x0 && sig.y0 < r.y1 && sig.y1 > r.y0)))
 			{
 				s_cur_seen[i] = 1;
 				s_cur_applied[i] = 1;
