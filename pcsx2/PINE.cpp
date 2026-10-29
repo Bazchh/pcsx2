@@ -10,6 +10,7 @@
 #include "VMManager.h"
 #include "vtlb.h"
 #include "GS/Renderers/HW/GSSceneLayer.h"
+#include "DebugTools/IAEmCall.h"
 #include "DebugTools/IAEmWatch.h"
 #include "common/Error.h"
 #include "common/Threading.h"
@@ -123,6 +124,7 @@ namespace PINEServer
 	static constexpr u32 EXT_CAP_SPEED = 2;
 	static constexpr u32 EXT_CAP_SCENE = 8;
 	static constexpr u32 EXT_CAP_WATCH = 16;
+	static constexpr u32 EXT_CAP_CALL = 32;
 	/** How long the server waits for a socket before checking the speed watchdog again. */
 	static constexpr int EXT_WATCHDOG_POLL_MS = 100;
 	/** Steady-clock instant, in ms, at which the limiter goes back to Nominal on its own. 0 means disarmed. */
@@ -197,6 +199,8 @@ namespace PINEServer
 		MsgExtWatchSet = 0x89, /**< Watches one address range for reads/writes, recording hits by pc. */
 		MsgExtWatchRead = 0x8A, /**< Returns the hit table, optionally resetting it. */
 		MsgExtWatchClear = 0x8B, /**< Removes the watch. */
+		// IAEmPS2 remote call (phase 2).
+		MsgExtCall = 0x8C, /**< Runs one function of the game on the EE and returns v0/v1. */
 		MsgUnimplemented = 0xFF /**< Unimplemented IPC message. */
 	};
 
@@ -845,7 +849,7 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 				if (!SafetyChecks(buf_cnt, 0, ret_cnt, 2 + 4, buf_size)) [[unlikely]]
 					goto error;
 				ToResultVector(ret_buffer, EXT_VERSION, ret_cnt);
-				ToResultVector(ret_buffer, static_cast<u32>(EXT_CAP_PAUSE | EXT_CAP_SPEED | EXT_CAP_SCENE | EXT_CAP_WATCH), ret_cnt + 2);
+				ToResultVector(ret_buffer, static_cast<u32>(EXT_CAP_PAUSE | EXT_CAP_SPEED | EXT_CAP_SCENE | EXT_CAP_WATCH | EXT_CAP_CALL), ret_cnt + 2);
 				ret_cnt += 6;
 				break;
 			}
@@ -1057,6 +1061,52 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 				Host::RunOnCPUThread([] {
 					IAEmWatch::Clear();
 				});
+				break;
+			}
+			case MsgExtCall:
+			{
+				// Arguments: u32 function, u8 argc (0..4), 4 x u32 args, u32 timeout ms. Reply: u8 status (0 done,
+				// 1 aborted on timeout, 2 refused: busy or VM not running), u32 v0, u32 v1, u32 elapsed ms.
+				// Synchronous: the PINE thread polls the CPU thread at every vsync until the function returns.
+				if (!SafetyChecks(buf_cnt, 4 + 1 + 4 * 4 + 4, ret_cnt, 1 + 4 + 4 + 4, buf_size)) [[unlikely]]
+					goto error;
+				const u32 func = FromSpan<u32>(buf, buf_cnt);
+				const u8 argc = FromSpan<u8>(buf, buf_cnt + 4);
+				u32 args[IAEmCall::MAX_ARGS];
+				for (u32 i = 0; i < IAEmCall::MAX_ARGS; i++)
+					args[i] = FromSpan<u32>(buf, buf_cnt + 5 + 4 * i);
+				const u32 timeout_ms = FromSpan<u32>(buf, buf_cnt + 21);
+				buf_cnt += 25;
+
+				u8 status = 2;
+				if (VMManager::HasValidVM() && VMManager::GetState() == VMState::Running && argc <= IAEmCall::MAX_ARGS)
+				{
+					bool started = false;
+					Host::RunOnCPUThread([&started, func, &args, argc] {
+						started = VMManager::GetState() == VMState::Running && IAEmCall::Start(func, args, argc);
+					}, true);
+					if (started)
+					{
+						const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+						bool done = false;
+						while (!done)
+						{
+							Host::RunOnCPUThread([&done] { done = IAEmCall::Poll(); }, true);
+							if (done || std::chrono::steady_clock::now() >= deadline || s_end.load(std::memory_order_acquire))
+								break;
+							std::this_thread::sleep_for(std::chrono::milliseconds(1));
+						}
+						if (!done)
+							Host::RunOnCPUThread([] { IAEmCall::Abort(); }, true);
+						status = done ? 0 : 1;
+					}
+				}
+				const IAEmCall::Result r = IAEmCall::Last();
+				ToResultVector(ret_buffer, status, ret_cnt);
+				ToResultVector(ret_buffer, r.v0, ret_cnt + 1);
+				ToResultVector(ret_buffer, r.v1, ret_cnt + 5);
+				ToResultVector(ret_buffer, r.elapsed_ms, ret_cnt + 9);
+				ret_cnt += 13;
 				break;
 			}
 			default:

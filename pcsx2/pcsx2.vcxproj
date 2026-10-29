@@ -356,6 +356,7 @@
     <ClCompile Include="GS\Renderers\HW\GSTextureReplacementLoaders.cpp" />
     <ClCompile Include="GS\Renderers\HW\GSTextureReplacements.cpp" />
     <ClCompile Include="GS\Renderers\HW\GSSceneLayer.cpp" />
+    <ClCompile Include="DebugTools\IAEmCall.cpp" />
     <ClCompile Include="DebugTools\IAEmWatch.cpp" />
     <ClCompile Include="GS\Renderers\Vulkan\GSDeviceVK.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
@@ -804,6 +805,7 @@
     <ClInclude Include="GS\Renderers\DX12\GSTexture12.h" />
     <ClInclude Include="GS\Renderers\HW\GSTextureReplacements.h" />
     <ClInclude Include="GS\Renderers\HW\GSSceneLayer.h" />
+    <ClInclude Include="DebugTools\IAEmCall.h" />
     <ClInclude Include="DebugTools\IAEmWatch.h" />
     <ClInclude Include="GS\Renderers\Vulkan\GSDeviceVK.h">
       <ExcludedFromBuild Condition="'$(Platform)'=='ARM64'">true</ExcludedFromBuild>
