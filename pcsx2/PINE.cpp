@@ -1065,10 +1065,13 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 			}
 			case MsgExtCall:
 			{
-				// Arguments: u32 function, u8 argc (0..4), 4 x u32 args, u32 timeout ms. Reply: u8 status (0 done,
-				// 1 aborted on timeout, 2 refused: busy or VM not running), u32 v0, u32 v1, u32 elapsed ms.
+				// Arguments: u32 function, u8 argc (0..4), 4 x u32 args, u32 timeout ms, u32 anchor pc, u32 anchor
+				// address (both 0 = divert at the next vsync, in whatever thread runs then; a pc diverts when the game
+				// reaches it; an address diverts when the game reads or writes its 16-byte line, in the thread that does
+				// it). Reply: u8 status (0 done, 1 aborted on timeout with registers restored, 2 refused: busy or VM not
+				// running, 3 lost: timeout with the hijacked thread still inside the function), u32 v0, u32 v1, u32 ms.
 				// Synchronous: the PINE thread polls the CPU thread at every vsync until the function returns.
-				if (!SafetyChecks(buf_cnt, 4 + 1 + 4 * 4 + 4, ret_cnt, 1 + 4 + 4 + 4, buf_size)) [[unlikely]]
+				if (!SafetyChecks(buf_cnt, 4 + 1 + 4 * 4 + 4 + 4 + 4, ret_cnt, 1 + 4 + 4 + 4, buf_size)) [[unlikely]]
 					goto error;
 				const u32 func = FromSpan<u32>(buf, buf_cnt);
 				const u8 argc = FromSpan<u8>(buf, buf_cnt + 4);
@@ -1076,14 +1079,16 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 				for (u32 i = 0; i < IAEmCall::MAX_ARGS; i++)
 					args[i] = FromSpan<u32>(buf, buf_cnt + 5 + 4 * i);
 				const u32 timeout_ms = FromSpan<u32>(buf, buf_cnt + 21);
-				buf_cnt += 25;
+				const u32 anchor_pc = FromSpan<u32>(buf, buf_cnt + 25);
+				const u32 anchor_addr = FromSpan<u32>(buf, buf_cnt + 29);
+				buf_cnt += 33;
 
 				u8 status = 2;
 				if (VMManager::HasValidVM() && VMManager::GetState() == VMState::Running && argc <= IAEmCall::MAX_ARGS)
 				{
 					bool started = false;
-					Host::RunOnCPUThread([&started, func, &args, argc] {
-						started = VMManager::GetState() == VMState::Running && IAEmCall::Start(func, args, argc);
+					Host::RunOnCPUThread([&started, func, &args, argc, anchor_pc, anchor_addr] {
+						started = VMManager::GetState() == VMState::Running && IAEmCall::Start(func, args, argc, anchor_pc, anchor_addr);
 					}, true);
 					if (started)
 					{
@@ -1098,7 +1103,8 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 						}
 						if (!done)
 							Host::RunOnCPUThread([] { IAEmCall::Abort(); }, true);
-						status = done ? 0 : 1;
+						const u8 last = IAEmCall::Last().status;
+						status = (last == IAEmCall::STATUS_DONE) ? 0 : (last == IAEmCall::STATUS_LOST ? 3 : 1);
 					}
 				}
 				const IAEmCall::Result r = IAEmCall::Last();

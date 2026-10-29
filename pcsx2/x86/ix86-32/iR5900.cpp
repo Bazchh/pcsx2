@@ -4,6 +4,7 @@
 #include "Common.h"
 #include "CDVD/CDVD.h"
 #include "DebugTools/Breakpoints.h"
+#include "DebugTools/IAEmCall.h"
 #include "DebugTools/IAEmWatch.h"
 #include "Elfheader.h"
 #include "GS.h"
@@ -1528,6 +1529,17 @@ bool COP2IsQOP(u32 code)
 void dynarecCheckBreakpoint()
 {
 	u32 pc = cpuRegs.pc;
+	// IAEmPS2 anchored call: its breakpoint never pauses; when armed it diverts the EE and leaves the block.
+	switch (IAEmCall::OnBreakpoint(pc))
+	{
+		case 1:
+			return;
+		case 2:
+			recExitExecution();
+			return;
+		default:
+			break;
+	}
 	if (CBreakPoints::CheckSkipFirst(BREAKPOINT_EE, pc) != 0)
 	{
 		CBreakPoints::ClearSkipFirst(BREAKPOINT_EE);
@@ -1577,6 +1589,18 @@ void dynarecMemcheck(size_t i)
 	{
 		if (!mc.cond.Evaluate())
 			return;
+	}
+
+	// IAEmPS2 anchored call: its memcheck never pauses; when armed it diverts the EE and leaves the block.
+	switch (IAEmCall::OnMemCheck(mc.start, mc.end))
+	{
+		case 1:
+			return;
+		case 2:
+			recExitExecution();
+			return;
+		default:
+			break;
 	}
 
 	// IAEmPS2 watch: record the hit and keep running instead of pausing the VM.
